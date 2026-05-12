@@ -2,7 +2,7 @@
 
 A minimal, standalone reference implementation of [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) (Nostr Connect) — the protocol for pairing with remote signers like Clave, Amber, Primal, or any bunker-compatible app.
 
-No blockchain, no NEAR, no SBT gates. Just pure Nostr NIP-46 pairing.
+
 
 ## What is NIP-46?
 
