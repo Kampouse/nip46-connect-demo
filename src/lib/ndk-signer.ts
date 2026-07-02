@@ -13,21 +13,27 @@
  * our own request/response pipeline — bypassing NDK's broken sendRequest entirely.
  */
 
-import {
-  generateSecretKey,
-  getPublicKey,
-  finalizeEvent,
-} from "nostr-tools/pure";
+import { bytesToHex } from "@noble/hashes/utils";
+import type { Event, EventTemplate } from "nostr-tools";
 import { SimplePool } from "nostr-tools";
-import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
 import {
   getConversationKey,
-  encrypt as nip44Encrypt,
   decrypt as nip44Decrypt,
+  encrypt as nip44Encrypt,
 } from "nostr-tools/nip44";
-import type { Event, EventTemplate } from "nostr-tools";
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+} from "nostr-tools/pure";
 
 // ── Types ─────────────────────────────────────────────────────────────
+
+interface Nip46Response {
+  id?: string;
+  result?: string;
+  error?: string;
+}
 
 export interface NdkConnectHandle {
   uri: string;
@@ -38,6 +44,10 @@ export interface NdkConnectHandle {
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 function randomId(len = 16): string {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let id = "";
@@ -47,15 +57,25 @@ function randomId(len = 16): string {
   return id;
 }
 
-function timeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function timeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error(`NIP-46 ${label} timed out (${ms / 1000}s)`)),
       ms,
     );
     promise.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); },
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
     );
   });
 }
@@ -77,9 +97,9 @@ interface PendingRequest {
 
 export class NdkNostrSigner {
   // Connection state (mirrors Dart's BunkerConnection)
-  private clientSecretKey: Uint8Array;  // local ephemeral secret
-  private clientPubkey: string;         // local ephemeral pubkey (hex)
-  private bunkerPubkey: string;         // remote bunker pubkey (hex)
+  private clientSecretKey: Uint8Array; // local ephemeral secret
+  private clientPubkey: string; // local ephemeral pubkey (hex)
+  private bunkerPubkey: string; // remote bunker pubkey (hex)
   private relays: string[];
 
   // Pending requests (mirrors Dart's _pendingRequests map)
@@ -119,23 +139,31 @@ export class NdkNostrSigner {
   // Subscribes to bunker responses: kind 24133, authored by bunker, p-tagged to us
   private listenRelays() {
     console.log("[NIP-46] listenRelays: subscribing to bunker responses");
-    this.sub = this.pool.subscribeMany(this.relays, {
-      kinds: [24133],
-      authors: [this.bunkerPubkey],
-      "#p": [this.clientPubkey],
-    } as any, {
-      onevent: (event) => this.onEvent(event),
-      oneose: () => console.log("[NIP-46] listenRelays: EOSE received"),
-    });
+    this.sub = this.pool.subscribeMany(
+      this.relays,
+      {
+        kinds: [24133],
+        authors: [this.bunkerPubkey],
+        "#p": [this.clientPubkey],
+        // biome-ignore lint/suspicious/noExplicitAny: nostr-tools Filter type doesn't include #p tag index
+      } as any,
+      {
+        onevent: (event) => this.onEvent(event),
+        oneose: () => console.log("[NIP-46] listenRelays: EOSE received"),
+      },
+    );
   }
 
   // ── onEvent — mirrors Dart's onEvent() exactly ────────────────────
   // Decrypt response → match by id → resolve/reject pending completer
   private async onEvent(event: Event) {
     try {
-      const conversationKey = getConversationKey(this.clientSecretKey, this.bunkerPubkey);
+      const conversationKey = getConversationKey(
+        this.clientSecretKey,
+        this.bunkerPubkey,
+      );
       const decrypted = nip44Decrypt(event.content, conversationKey);
-      const response = JSON.parse(decrypted);
+      const response = JSON.parse(decrypted) as Nip46Response;
 
       console.log("[NIP-46] onEvent:", {
         id: response.id?.slice(0, 8),
@@ -152,8 +180,12 @@ export class NdkNostrSigner {
 
       const entry = this.pending.get(response.id);
       if (!entry) {
-      console.log("[NIP-46] no pending request for id:", response.id?.slice(0, 8),
-        "pending:", Array.from(this.pending.keys()).map(k => k.slice(0, 8)));
+        console.log(
+          "[NIP-46] no pending request for id:",
+          response.id?.slice(0, 8),
+          "pending:",
+          Array.from(this.pending.keys()).map((k) => k.slice(0, 8)),
+        );
         return;
       }
 
@@ -164,8 +196,8 @@ export class NdkNostrSigner {
       } else {
         entry.resolve(response.result);
       }
-    } catch (e: any) {
-      console.error("[NIP-46] onEvent error:", e.message);
+    } catch (e) {
+      console.error("[NIP-46] onEvent error:", errMsg(e));
     }
   }
 
@@ -178,7 +210,10 @@ export class NdkNostrSigner {
     const request = { id, method, params };
 
     // Encrypt with NIP-44
-    const conversationKey = getConversationKey(this.clientSecretKey, this.bunkerPubkey);
+    const conversationKey = getConversationKey(
+      this.clientSecretKey,
+      this.bunkerPubkey,
+    );
     const encrypted = nip44Encrypt(JSON.stringify(request), conversationKey);
 
     // Build kind 24133 event — mirrors Dart's requestEvent
@@ -208,10 +243,16 @@ export class NdkNostrSigner {
 
     // Broadcast — mirrors Dart's broadcast.broadcast()
     const publishResults = await Promise.allSettled(
-      this.relays.map(r => this.pool.publish([r], signed)),
+      this.relays.map((r) => this.pool.publish([r], signed)),
     );
-    const published = publishResults.filter(r => r.status === "fulfilled").length;
-    console.log("[NIP-46] published to", published + "/" + this.relays.length, "relays");
+    const published = publishResults.filter(
+      (r) => r.status === "fulfilled",
+    ).length;
+    console.log(
+      "[NIP-46] published to",
+      `${published}/${this.relays.length}`,
+      "relays",
+    );
 
     // Return completer.future with 30s timeout — mirrors Dart's completer.future
     return timeout(promise, 30_000, method);
@@ -235,23 +276,37 @@ export class NdkNostrSigner {
       tags: template.tags,
       created_at: template.created_at,
     };
-    const signedJson = await this.remoteRequest("sign_event", [JSON.stringify(eventMap)]);
+    const signedJson = await this.remoteRequest("sign_event", [
+      JSON.stringify(eventMap),
+    ]);
     return JSON.parse(signedJson) as Event;
   }
 
-  async nip44Encrypt(recipientPubkey: string, plaintext: string): Promise<string> {
+  async nip44Encrypt(
+    recipientPubkey: string,
+    plaintext: string,
+  ): Promise<string> {
     return this.remoteRequest("nip44_encrypt", [recipientPubkey, plaintext]);
   }
 
-  async nip44Decrypt(senderPubkey: string, ciphertext: string): Promise<string> {
+  async nip44Decrypt(
+    senderPubkey: string,
+    ciphertext: string,
+  ): Promise<string> {
     return this.remoteRequest("nip44_decrypt", [senderPubkey, ciphertext]);
   }
 
-  async nip04Encrypt(recipientPubkey: string, plaintext: string): Promise<string> {
+  async nip04Encrypt(
+    recipientPubkey: string,
+    plaintext: string,
+  ): Promise<string> {
     return this.remoteRequest("nip04_encrypt", [recipientPubkey, plaintext]);
   }
 
-  async nip04Decrypt(senderPubkey: string, ciphertext: string): Promise<string> {
+  async nip04Decrypt(
+    senderPubkey: string,
+    ciphertext: string,
+  ): Promise<string> {
     return this.remoteRequest("nip04_decrypt", [senderPubkey, ciphertext]);
   }
 
@@ -259,16 +314,33 @@ export class NdkNostrSigner {
     return this.remoteRequest("ping");
   }
 
-  get userPubkey(): string | null { return this._userPubkey; }
-  get bunker(): string { return this.bunkerPubkey; }
+  get userPubkey(): string | null {
+    return this._userPubkey;
+  }
+
+  /** Set the cached pubkey (fallback when get_public_key RPC fails). */
+  setUserPubkey(pk: string): void {
+    this._userPubkey = pk;
+  }
+  get bunker(): string {
+    return this.bunkerPubkey;
+  }
 
   async getRealPubkey(): Promise<string | null> {
-    try { return await this.getPublicKey(); }
-    catch { return null; }
+    try {
+      return await this.getPublicKey();
+    } catch {
+      return null;
+    }
   }
 
   // Serialize session for persistence
-  serialize(): { clientSecretKey: string; bunkerPubkey: string; relays: string[]; userPubkey?: string } {
+  serialize(): {
+    clientSecretKey: string;
+    bunkerPubkey: string;
+    relays: string[];
+    userPubkey?: string;
+  } {
     return {
       clientSecretKey: bytesToHex(this.clientSecretKey),
       bunkerPubkey: this.bunkerPubkey,
@@ -321,7 +393,8 @@ export function startNdkConnect(opts: {
   if (perms) params.push(`perms=${encodeURIComponent(perms)}`);
   if (metadata?.name) params.push(`name=${encodeURIComponent(metadata.name)}`);
   if (metadata?.url) params.push(`url=${encodeURIComponent(metadata.url)}`);
-  if (metadata?.image) params.push(`image=${encodeURIComponent(metadata.image)}`);
+  if (metadata?.image)
+    params.push(`image=${encodeURIComponent(metadata.image)}`);
 
   const uri = `nostrconnect://${clientPubkey}?${params.join("&")}`;
 
@@ -334,44 +407,61 @@ export function startNdkConnect(opts: {
   //   subscription = _requests.subscription(kinds: [24133], pTags: [clientPubkey])
   //   await for event where result === secret
   const pool = new SimplePool();
-  let bunkerPubkey: string | null = null;
 
   const pairPromise = new Promise<string>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`Pairing timed out (${(pairTimeoutMs || 300_000) / 1000}s)`)),
+      () =>
+        reject(
+          new Error(
+            `Pairing timed out (${(pairTimeoutMs || 300_000) / 1000}s)`,
+          ),
+        ),
       pairTimeoutMs || 300_000,
     );
 
-    const sub = pool.subscribeMany(relays, {
-      kinds: [24133],
-      "#p": [clientPubkey],
-    } as any, {
-      onevent: async (event) => {
-        try {
-          // We don't know the bunker pubkey yet — try to decrypt from the event author
-          const conversationKey = getConversationKey(clientSecretKey, event.pubkey);
-          const decrypted = nip44Decrypt(event.content, conversationKey);
-          const response = JSON.parse(decrypted);
+    const sub = pool.subscribeMany(
+      relays,
+      {
+        kinds: [24133],
+        "#p": [clientPubkey],
+        // biome-ignore lint/suspicious/noExplicitAny: nostr-tools Filter type doesn't include #p tag index
+      } as any,
+      {
+        onevent: async (event) => {
+          try {
+            // We don't know the bunker pubkey yet — try to decrypt from the event author
+            const conversationKey = getConversationKey(
+              clientSecretKey,
+              event.pubkey,
+            );
+            const decrypted = nip44Decrypt(event.content, conversationKey);
+            const response = JSON.parse(decrypted) as Nip46Response;
 
-          console.log("[NIP-46] pair response:", {
-            id: response.id?.slice(0, 8),
-            result: response.result?.slice?.(0, 30),
-            from: event.pubkey.slice(0, 12),
-          });
+            console.log("[NIP-46] pair response:", {
+              id: response.id?.slice(0, 8),
+              result: response.result?.slice?.(0, 30),
+              from: event.pubkey.slice(0, 12),
+            });
 
-          // Dart: if (response["result"] == secret) → accept
-          if (response.result === pairingSecret || response.result === "ack") {
-            clearTimeout(timer);
-            sub.close();
-            bunkerPubkey = event.pubkey;
-            console.log("[NIP-46] PAIRED with bunker:", event.pubkey.slice(0, 16));
-            resolve(event.pubkey);
+            // Dart: if (response["result"] == secret) → accept
+            if (
+              response.result === pairingSecret ||
+              response.result === "ack"
+            ) {
+              clearTimeout(timer);
+              sub.close();
+              console.log(
+                "[NIP-46] PAIRED with bunker:",
+                event.pubkey.slice(0, 16),
+              );
+              resolve(event.pubkey);
+            }
+          } catch {
+            // Can't decrypt from this author — not our bunker, ignore
           }
-        } catch (e: any) {
-          // Can't decrypt from this author — not our bunker, ignore
-        }
+        },
       },
-    });
+    );
   });
 
   // ── Phase 2: After pairing, create signer and call getPublicKey ──
@@ -401,11 +491,11 @@ export function startNdkConnect(opts: {
     try {
       const pubkey = await signer.getPublicKey();
       console.log("[NIP-46] user pubkey:", pubkey.slice(0, 16));
-    } catch (e: any) {
-      console.warn("[NIP-46] getPublicKey failed:", e.message);
+    } catch (e) {
+      console.warn("[NIP-46] getPublicKey failed:", errMsg(e));
       // Some signers (Primal with non-Full trust) may reject get_public_key
       // Fall back to bunker pubkey — mirrors our previous fallback behavior
-      (signer as any)._userPubkey = bunker;
+      signer.setUserPubkey(bunker);
     }
 
     return signer;
