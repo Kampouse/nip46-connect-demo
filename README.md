@@ -1,5 +1,7 @@
 # NIP-46 NostrConnect Demo
 
+🌐 **Live demo:** [nip46-connect-demo.pages.dev](https://nip46-connect-demo.pages.dev)
+
 here the full demo when working using primal as an host <br> <nl> 
 <img width="564" height="720" alt="2026 07 03_0233" src="https://github.com/user-attachments/assets/9ec48d17-3eff-425e-9cb6-8e5177465934" />
 
