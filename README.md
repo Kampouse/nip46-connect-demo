@@ -1,6 +1,6 @@
 # NIP-46 NostrConnect Demo
 
-here the full demo when working using primal as an host 
+here the full demo when working using primal as an host <br>
 https://github.com/user-attachments/assets/906009ee-2f44-4fe9-80bb-bcf439faa6c7
 
 
