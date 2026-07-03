@@ -1,7 +1,8 @@
 # NIP-46 NostrConnect Demo
 
-here the full demo when working using primal as an host <br>
-https://github.com/user-attachments/assets/906009ee-2f44-4fe9-80bb-bcf439faa6c7
+here the full demo when working using primal as an host <br> <nl> 
+<img width="564" height="720" alt="2026 07 03_0233" src="https://github.com/user-attachments/assets/9ec48d17-3eff-425e-9cb6-8e5177465934" />
+
 
 
 A minimal, standalone reference implementation of [NIP-46](https://github.com/nostr-protocol/nips/blob/master/46.md) (Nostr Connect) — the protocol for pairing with remote signers like Clave, Amber, Primal, or any bunker-compatible app.
